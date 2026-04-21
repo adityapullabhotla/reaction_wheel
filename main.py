@@ -1,6 +1,9 @@
 import RPi.GPIO as GPIO
 import time
 import sys
+import board
+import busio
+import adafruit_bno055
 
 # --- HARDWARE PINS ---
 R_EN = 26
@@ -11,11 +14,21 @@ ENC_A = 17
 ENC_B = 22
 
 # --- MOTOR SETTINGS ---
-# Changed from 28 to 7 for 1X decoding to prevent CPU overload/aliasing
 CPR = 7.0 
 
 def main():
-    # 1. USER INPUT VALIDATION
+    # --- 1. IMU SETUP ---
+    print("Initializing I2C and BNO055 IMU...")
+    try:
+        i2c = busio.I2C(board.SCL, board.SDA)
+        sensor = adafruit_bno055.BNO055_I2C(i2c)
+        print("IMU initialized successfully.\n")
+    except Exception as e:
+        print(f"Error initializing IMU: {e}")
+        print("Check your I2C wiring (SDA/SCL) and ensure I2C is enabled in raspi-config.")
+        sys.exit(1)
+
+    # --- 2. USER INPUT VALIDATION ---
     while True:
         try:
             user_input = input("Enter Duty Cycle (0 to 1) and Direction (e.g., '0.5 cw'): ").strip().lower().split()
@@ -41,42 +54,35 @@ def main():
     pwm_percent = duty_cycle * 100.0
     print(f"\nStarting motor... Duty Cycle: {duty_cycle} ({pwm_percent}%) | Direction: {direction}. Press Ctrl+C to stop.\n")
 
-    # 2. GPIO SETUP
+    # --- 3. GPIO SETUP ---
     GPIO.setmode(GPIO.BCM)
     GPIO.setup([R_EN, L_EN, RPWM, LPWM], GPIO.OUT)
     GPIO.setup([ENC_A, ENC_B], GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-    # 3. INITIALIZE H-BRIDGE STATES
-    # Ensure PWM pins are strictly LOW to start
+    # --- 4. INITIALIZE H-BRIDGE STATES ---
     GPIO.output(RPWM, GPIO.LOW)
     GPIO.output(LPWM, GPIO.LOW)
-    
-    # Both EN pins must be high before applying PWM.
     GPIO.output(R_EN, GPIO.HIGH)
     GPIO.output(L_EN, GPIO.HIGH)
 
-    # 4. ENCODER INTERRUPTS (1X Decoding)
+    # --- 5. ENCODER INTERRUPTS ---
     encoder_pos = 0
 
     def encoder_callback_A(channel):
         nonlocal encoder_pos
-        # We only trigger on the RISING edge of A.
-        # We check the state of B to determine direction.
         if GPIO.input(ENC_B) == GPIO.LOW:
             encoder_pos += 1
         else:
             encoder_pos -= 1
 
-    # Only attach ONE interrupt event to ONE pin (Rising edge only)
     GPIO.add_event_detect(ENC_A, GPIO.RISING, callback=encoder_callback_A)
 
-    # 5. OPEN-LOOP CONTROL EXECUTION
+    # --- 6. CONTROL AND TELEMETRY LOOP ---
     last_pos = 0
     last_time = time.time()
-    active_pwm = None # Track which PWM stream is running
+    active_pwm = None 
     
     try:
-        # Strictly pull the inactive pin LOW, and only assign PWM to the active pin
         if direction == 'cw':
             GPIO.output(LPWM, GPIO.LOW) 
             active_pwm = GPIO.PWM(RPWM, 1000)
@@ -86,7 +92,7 @@ def main():
             active_pwm = GPIO.PWM(LPWM, 1000)
             active_pwm.start(pwm_percent)
 
-        # Run telemetry loop at roughly 10 Hz
+        # Telemetry loop
         while True:
             time.sleep(0.1) 
             
@@ -99,17 +105,27 @@ def main():
             last_pos = current_pos
             last_time = current_time
             
+            # Motor RPM Math
             if dt > 0:
-                current_rpm = (delta_pos / CPR) * (60.0 / dt)
+                motor_rpm = (delta_pos / CPR) * (60.0 / dt)
             else:
-                current_rpm = 0.0
+                motor_rpm = 0.0
                 
-            print(f"Duty Cycle: {duty_cycle} | Direction: {direction} | Current: {current_rpm:>6.1f} RPM | Total Ticks: {current_pos}")
+            # Platform RPM Math (IMU)
+            gyro_data = sensor.gyro
+            platform_rpm = 0.0
+            
+            # The BNO055 returns gyroscope data in radians per second (rad/s).
+            # We index [2] to get the Z-axis (yaw) rotation of the platform.
+            if gyro_data is not None and gyro_data[2] is not None:
+                # Conversion: 1 rad/s = 9.549297 RPM
+                platform_rpm = gyro_data[2] * 9.549297
+                
+            print(f"Motor: {motor_rpm:>6.1f} RPM | Platform (IMU Z-Axis): {platform_rpm:>6.1f} RPM")
 
     except KeyboardInterrupt:
         print("\nKeyboardInterrupt detected. Stopping motor safely...")
     finally:
-        # Safely shut down whatever PWM stream is currently active
         if active_pwm:
             active_pwm.stop()
         GPIO.output(RPWM, GPIO.LOW)
