@@ -15,8 +15,8 @@ ENC_A = 17
 ENC_B = 22
 
 # --- PID GAINS (THESE NEED TUNING) ---
-Kp = 1.5   # Proportional gain: How aggressively to fight the spin
-Ki = 0.0   # Integral gain: Fixes steady-state errors (keep 0 to start)
+Kp = 3.5   # Proportional gain: How aggressively to fight the spin
+Ki = 0.175   # Integral gain: Fixes steady-state errors (keep 0 to start)
 Kd = 0.1   # Derivative gain: Dampens the response to prevent overshoot
 
 # --- MOTOR SETTINGS ---
