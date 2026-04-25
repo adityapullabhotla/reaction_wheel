@@ -15,11 +15,10 @@ def main():
         sensor = BNO08X_I2C(i2c)
         # Explicitly enable the gyroscope feature to get angular velocity
         sensor.enable_feature(BNO_REPORT_GYROSCOPE)
-        print("IMU initialized successfully!")
-        print("Spin the platform with your hand... Press Ctrl+C to stop.\n")
+        print("IMU initialized successfully")
+        print("Spin the platform with your hand.")
     except Exception as e:
         print(f"Error initializing IMU: {e}")
-        print("Make sure you rebooted after setting i2c_arm_baudrate=400000 in config.txt")
         return
 
     try:

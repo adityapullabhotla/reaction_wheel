@@ -24,7 +24,7 @@ def test_camera():
             frame = picam2.capture_array()
             
             # Picamera2 grabs in RGB, but OpenCV expects BGR colors
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2RGB)
             
             frames_grabbed += 1
             if frames_grabbed % 10 == 0:
