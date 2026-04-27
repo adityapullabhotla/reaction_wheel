@@ -2,7 +2,7 @@ import RPi.GPIO as GPIO
 import time
 import sys
 
-# --- HARDWARE PINS ---
+# HARDWARE PINS
 R_EN = 26
 L_EN = 16
 RPWM = 5
@@ -10,12 +10,12 @@ LPWM = 6
 ENC_A = 17
 ENC_B = 22
 
-# --- MOTOR SETTINGS ---
-# Changed from 28 to 7 for 1X decoding to prevent CPU overload/aliasing
+# MOTOR SETTINGS
+# Changed from 28 ticks per revolution to 7 for .25X decoding to prevent CPU overloading
 CPR = 7.0 
 
 def main():
-    # 1. USER INPUT VALIDATION
+    # USER INPUT
     while True:
         try:
             user_input = input("Enter Duty Cycle (0 to 1) and Direction (e.g., '0.5 cw'): ").strip().lower().split()
@@ -41,42 +41,43 @@ def main():
     pwm_percent = duty_cycle * 100.0
     print(f"\nStarting motor... Duty Cycle: {duty_cycle} ({pwm_percent}%) | Direction: {direction}. Press Ctrl+C to stop.\n")
 
-    # 2. GPIO SETUP
+    # GPIO SETUP
     GPIO.setmode(GPIO.BCM)
     GPIO.setup([R_EN, L_EN, RPWM, LPWM], GPIO.OUT)
     GPIO.setup([ENC_A, ENC_B], GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-    # 3. INITIALIZE H-BRIDGE STATES
-    # Ensure PWM pins are strictly LOW to start
+    # INITIALIZE H-BRIDGE PIN STATES
+    # PWM pins are strictly LOW to start
     GPIO.output(RPWM, GPIO.LOW)
     GPIO.output(LPWM, GPIO.LOW)
     
-    # Both EN pins must be high before applying PWM.
+    # Both EN pins must be high before applying PWM for BOTH forward and reverse spin direction
     GPIO.output(R_EN, GPIO.HIGH)
     GPIO.output(L_EN, GPIO.HIGH)
 
-    # 4. ENCODER INTERRUPTS (1X Decoding)
+    # ENCODER COUNT
     encoder_pos = 0
 
     def encoder_callback_A(channel):
         nonlocal encoder_pos
-        # We only trigger on the RISING edge of A.
-        # We check the state of B to determine direction.
+        # only trigger on the rising edge of A.
+        # check the state of B to determine direction.
         if GPIO.input(ENC_B) == GPIO.LOW:
-            encoder_pos += 1
+            encoder_pos += 1 # add tick for one direction
         else:
-            encoder_pos -= 1
+            encoder_pos -= 1 # subtract tick for the other direction
 
-    # Only attach ONE interrupt event to ONE pin (Rising edge only)
+    # Only attach one interrupt event to one pin (Rising edge only)
     GPIO.add_event_detect(ENC_A, GPIO.RISING, callback=encoder_callback_A)
 
-    # 5. OPEN-LOOP CONTROL EXECUTION
+    # OPEN-LOOP CONTROL EXECUTION
     last_pos = 0
     last_time = time.time()
     active_pwm = None # Track which PWM stream is running
     
     try:
-        # Strictly pull the inactive pin LOW, and only assign PWM to the active pin
+        # set the inactive pin as LOW, and only apply PWM to the active pin
+        # only one pwm signal can be high for each direction. other one has to be low
         if direction == 'cw':
             GPIO.output(LPWM, GPIO.LOW) 
             active_pwm = GPIO.PWM(RPWM, 1000)
@@ -86,7 +87,7 @@ def main():
             active_pwm = GPIO.PWM(LPWM, 1000)
             active_pwm.start(pwm_percent)
 
-        # Run telemetry loop at roughly 10 Hz
+        # run control loop at 10 Hertz
         while True:
             time.sleep(0.1) 
             
@@ -109,9 +110,11 @@ def main():
     except KeyboardInterrupt:
         print("\nKeyboardInterrupt detected. Stopping motor safely...")
     finally:
-        # Safely shut down whatever PWM stream is currently active
+        # shut down PWM streams
         if active_pwm:
             active_pwm.stop()
+        
+        # shutdown all hardware pins
         GPIO.output(RPWM, GPIO.LOW)
         GPIO.output(LPWM, GPIO.LOW)
         GPIO.output(R_EN, GPIO.LOW)

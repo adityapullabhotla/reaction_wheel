@@ -1,8 +1,10 @@
+
 import cv2
 import time
 from picamera2 import Picamera2
 from flask import Flask, Response
 
+# Set up Flash web abb to remotely view live feed of camera
 app = Flask(__name__)
 picam2 = None
 
@@ -18,8 +20,8 @@ def init_camera():
 
 def set_camera(cam):
     """
-    Called by tracking.py to inject its already-running picam2 instance.
-    This way only one script opens the camera — no conflict.
+    Called by tracking.py to inject its already-running picam2 instance
+    so only one script opens the camera
     """
     global picam2
     picam2 = cam
@@ -27,8 +29,8 @@ def set_camera(cam):
 def generate_frames():
     while True:
         frame = picam2.capture_array()
-        frame = frame[:, :, ::-1]   # fix R↔B channel order
-        frame = cv2.flip(frame, -1)
+        frame = frame[:, :, ::-1]   # fix RGB channel order from Pi to OpenCV (wow thank god)
+        frame = cv2.flip(frame, -1) # flip frame 180 degrees so images appear right side up (camera mounted upside down)
 
         # Crosshair for center reference
         cv2.line(frame, (320, 0), (320, 480), (0, 255, 0), 1)

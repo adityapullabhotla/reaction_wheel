@@ -6,13 +6,13 @@ import RPi.GPIO as GPIO
 from picamera2 import Picamera2
 from camera_live_feed import app, set_camera
 
-# --- HARDWARE PINS ---
+# HARDWARE PINS
 R_EN = 26
 L_EN = 16
 RPWM = 5
 LPWM = 6
 
-# --- GPIO SETUP ---
+# GPIO SETUP
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 GPIO.setup([R_EN, L_EN, RPWM, LPWM], GPIO.OUT)
@@ -24,46 +24,43 @@ pwm_l = GPIO.PWM(LPWM, 1000)
 pwm_r.start(0)
 pwm_l.start(0)
 
-# --- PID CONSTANTS ---
-# Low Kp keeps motor commands small and smooth.
-# High Kd relative to Kp is the key anti-jitter trick — it heavily suppresses
-# fast pixel noise (high rate of change) while still responding to real
-# slow ball movement (low rate of change).
-Kp = 0.1
-Ki = 0.00
-Kd = 0.05
+# PID GAINS
+Kp = 0.1 # Proportional gain: How aggressively to fight the spin
+Ki = 0.00 # Integral gain: Fixes steady-state errors over time (don't want to use this for tracking)
+Kd = 0.05 # Derivative gain: Dampens the response to prevent overshoot
 
-# --- MOTOR POWER LIMITS ---
-PWM_MIN = 12.0   # stiction floor
-PWM_MAX = 40.0   # hard cap — keeps everything slow and controlled
+# SET MOTOR POWER LIMITS TO ENSURE SMOOTH TRACKING AND PREVENT REACTION WHEEL SATURATION
+PWM_MIN = 12.0 # enough to overcome friction
+PWM_MAX = 40.0 # cap to motor output to keep control and avoid saturation
 
-# --- DEAD ZONE ---
-# 15px = ~2.3% of frame width. Tight enough that the ball looks centered,
-# but not so tight that pixel noise triggers constant tiny corrections.
+# Dead Zone
+# 15px = 2.3% of frame width. enough for the ball to look centered in frame
+# but not so tight that it triggers constant small corrections.
 DEAD_ZONE_PX = 15
 
-# --- BALL POSITION SMOOTHING ---
+# BALL POSITION SMOOTHING
 # Average the detected ball X position over this many frames before feeding
-# it to the PID. Kills frame-to-frame pixel jitter at the source.
+# it to the PID. prevent frame-to-frame pixel jitter
 SMOOTH_FRAMES = 3
 
-# --- TENNIS BALL HSV THRESHOLDS ---
+# TENNIS BALL HSV THRESHOLDS
 BALL_LOWER = (25, 100, 100)
 BALL_UPPER = (45, 255, 255)
 
+# TRACK NOT ONLY COLOR BUT CIRCULARITY AS WELL
 MIN_AREA = 400
-CIRCULARITY_THRESHOLD = 0.4
+CIRCULARITY_THRESHOLD = 0.4 #.4 to allow for half-circles when ball is only partially in frame
 
-# --- MISS / SEARCH SETTINGS ---
-# Ball must disappear for this many consecutive frames before search activates.
-# During the grace period the motor coasts at its last value.
+# MISS / SEARCH SETTINGS
+# Ball must disappear for this many consecutive frames before search mode activates.
+# During this period the motor coasts at its last value.
 MISS_FRAMES_BEFORE_SEARCH = 8
 
 # How long to hold the last-known direction before giving up and sweeping.
 SEARCH_HOLD_TIME = 1.5      # seconds
-SEARCH_HOLD_PWM  = 12.0     # low power directional chase
+SEARCH_HOLD_PWM  = 15.0     # power for directional search
 
-# Constant slow sweep power once hold phase expires.
+# Constant slow sweep power once hold phase expires
 SEARCH_SWEEP_PWM = 10.0     # slow enough to actually catch the ball when it appears
 
 
@@ -71,9 +68,9 @@ def clamp_motor(value):
     """Bound command to [PWM_MIN, PWM_MAX], preserving sign. Returns 0 if tiny."""
     if abs(value) < 0.5:
         return 0.0
-    sign      = 1 if value > 0 else -1
+    sign = 1 if value > 0 else -1
     magnitude = max(PWM_MIN, min(abs(value), PWM_MAX))
-    return sign * magnitude
+    return sign*magnitude
 
 
 def set_motor(pwm_command):
@@ -93,7 +90,7 @@ def set_motor(pwm_command):
 
 def is_circular(contour):
     """True if contour circularity >= threshold. 0.4 allows partial half-circles."""
-    area      = cv2.contourArea(contour)
+    area = cv2.contourArea(contour)
     perimeter = cv2.arcLength(contour, True)
     if perimeter == 0:
         return False
@@ -112,7 +109,7 @@ def find_ball(frame):
 
     contours, _ = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    best      = None
+    best = None
     best_area = 0
     for c in contours:
         area = cv2.contourArea(c)
@@ -122,7 +119,7 @@ def find_ball(frame):
             continue
         if area > best_area:
             best_area = area
-            best      = c
+            best = c
 
     if best is None:
         return None
@@ -131,8 +128,8 @@ def find_ball(frame):
     if M["m00"] == 0:
         return None
 
-    cx     = int(M["m10"] / M["m00"])
-    cy     = int(M["m01"] / M["m00"])
+    cx = int(M["m10"] / M["m00"])
+    cy = int(M["m01"] / M["m00"])
     _, rad = cv2.minEnclosingCircle(best)
     return cx, cy, int(rad)
 
@@ -161,28 +158,28 @@ def track():
 
     center_x = 320
 
-    # PID state
+    # PID state variables
     integral   = 0.0
     prev_error = 0.0
     prev_time  = time.time()
     last_pwm   = 0.0
 
-    # Ball position smoother — rolling average over last SMOOTH_FRAMES detections
+    # Ball position smoother: average over last SMOOTH_FRAMES detections
     ball_x_history = []
 
     # Search / miss state
     miss_count       = 0
-    last_known_dir   = 0    # +1 or -1, direction ball was last seen heading
+    last_known_dir   = 0    # +1 or -1, direction ball was last seen moving
     lost_since       = None
-    search_sweep_dir = 1    # alternates during sweep phase
+    search_sweep_dir = 1    # alternates ±1 during sweep phase to check both directions
 
-    print("Tracking active. Press Ctrl+C to stop.")
+    print("Tracking active.")
     print(f"Kp={Kp}  Kd={Kd}  |  PWM {PWM_MIN}–{PWM_MAX}%  |  Dead zone ±{DEAD_ZONE_PX}px  |  Smooth over {SMOOTH_FRAMES} frames")
 
     try:
         while True:
             frame = picam2.capture_array()
-            frame = frame[:, :, ::-1]   # fix R↔B channel order
+            frame = frame[:, :, ::-1]   # fix RGB channel order
             frame = cv2.flip(frame, -1)
 
             current_time = time.time()
@@ -194,7 +191,7 @@ def track():
             result = find_ball(frame)
 
             if result is not None:
-                # ── TRACKING MODE ─────────────────────────────────────────
+                # TRACKING MODE
                 ball_cx, ball_cy, radius = result
 
                 # Reset miss/search state
@@ -208,14 +205,14 @@ def track():
                     ball_x_history.pop(0)
                 smoothed_cx = int(sum(ball_x_history) / len(ball_x_history))
 
-                error = center_x - smoothed_cx   # +ve = ball left → spin right
+                error = center_x - smoothed_cx   # +ve = ball left -> spin right
 
                 # Record direction for search memory
                 if abs(error) > DEAD_ZONE_PX:
                     last_known_dir = 1 if error > 0 else -1
 
                 if abs(error) < DEAD_ZONE_PX:
-                    # Ball is centred — stop motor, bleed integrator
+                    # Ball is centred —> stop motor
                     pwm_out  = 0.0
                     integral = 0.0
                 else:
@@ -232,33 +229,33 @@ def track():
                       f"Error: {error:+6.1f}px | Motor: {pwm_out:+6.1f}%")
 
             else:
-                # ── BALL NOT VISIBLE ──────────────────────────────────────
+                # BALL NOT VISIBLE
                 miss_count += 1
-                integral    = 0.0
-                prev_error  = 0.0
-                ball_x_history.clear()   # stale history — clear so next lock-on starts fresh
+                integral = 0.0
+                prev_error = 0.0
+                ball_x_history.clear()  # remove history — clear so next lock-on starts fresh
 
                 if miss_count < MISS_FRAMES_BEFORE_SEARCH:
-                    # COASTING — brief flicker, hold last motor value and wait
-                    # Don't call set_motor — platform keeps moving as-is
+                    # COASTING —> brief flicker, hold last motor value and wait
+                    # Don't call set_motor —> platform keeps moving 
                     print(f"COASTING  | Miss {miss_count}/{MISS_FRAMES_BEFORE_SEARCH} "
                           f"| Holding {last_pwm:+.1f}%")
 
                 else:
-                    # Genuinely lost — start searching
+                    # ball not found -> start searching
                     if lost_since is None:
                         lost_since = current_time
                     time_lost = current_time - lost_since
 
                     if last_known_dir != 0 and time_lost < SEARCH_HOLD_TIME:
-                        # PHASE 1 — Chase in the last known direction at low power
+                        # 1.) Chase in the last known direction at low power
                         set_motor(last_known_dir * SEARCH_HOLD_PWM)
                         last_pwm = last_known_dir * SEARCH_HOLD_PWM
                         print(f"SEARCH-CHASE | {'CW ' if last_known_dir > 0 else 'CCW'} "
                               f"@ {SEARCH_HOLD_PWM}%  |  {time_lost:.1f}s / {SEARCH_HOLD_TIME}s")
 
                     else:
-                        # PHASE 2 — Slow constant sweep back and forth
+                        # 2.) Slow constant sweep back and forth attempt to find ball
                         set_motor(search_sweep_dir * SEARCH_SWEEP_PWM)
                         last_pwm = search_sweep_dir * SEARCH_SWEEP_PWM
                         print(f"SEARCH-SWEEP | {'CW ' if search_sweep_dir > 0 else 'CCW'} "
@@ -272,6 +269,8 @@ def track():
     except KeyboardInterrupt:
         print("\nStopped by user.")
     finally:
+        
+        # shutdown hardware
         set_motor(0)
         pwm_l.stop()
         pwm_r.stop()
@@ -284,7 +283,7 @@ def track():
         print("Hardware cleaned up.")
 
 
-# ── HSV TUNER (optional) ──────────────────────────────────────────────────────
+# HSV TUNER (optional)
 # def hsv_tuner():
 #     picam2 = Picamera2()
 #     config = picam2.create_preview_configuration(main={"size": (640, 480), "format": "BGR888"})

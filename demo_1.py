@@ -6,7 +6,7 @@ import RPi.GPIO as GPIO
 from adafruit_bno08x.i2c import BNO08X_I2C
 from adafruit_bno08x import BNO_REPORT_GYROSCOPE
 
-# --- HARDWARE PINS ---
+#HARDWARE PINS
 R_EN = 26
 L_EN = 16
 RPWM = 5
@@ -14,12 +14,12 @@ LPWM = 6
 ENC_A = 17
 ENC_B = 22
 
-# --- PID GAINS (THESE NEED TUNING) ---
+# PID GAINS
 Kp = 3.5   # Proportional gain: How aggressively to fight the spin
-Ki = 0.175   # Integral gain: Fixes steady-state errors (keep 0 to start)
+Ki = 0.175  # Integral gain: Fixes steady-state errors over time
 Kd = 0.1   # Derivative gain: Dampens the response to prevent overshoot
 
-# --- MOTOR SETTINGS ---
+# MOTOR OUTPUT SETTINGS
 MAX_PWM = 100.0
 MIN_PWM = 0.0
 
@@ -29,7 +29,7 @@ def clamp(value, min_val, max_val):
 def main():
     print("Initializing System for Demo 1...")
     
-    # 1. IMU SETUP
+    # IMU SETUP
     try:
         i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
         sensor = BNO08X_I2C(i2c)
@@ -39,12 +39,16 @@ def main():
         print(f"Error initializing IMU: {e}")
         sys.exit(1)
 
-    # 2. GPIO SETUP
+    # GPIO SETUP
     GPIO.setmode(GPIO.BCM)
     GPIO.setup([R_EN, L_EN, RPWM, LPWM], GPIO.OUT)
+    
+    # set both pwm pins as low to start
     GPIO.output(RPWM, GPIO.LOW)
     GPIO.output(LPWM, GPIO.LOW)
-    GPIO.output(R_EN, GPIO.HIGH)
+    
+    # As per motor control diagram both enabler pins need to be set high
+    GPIO.output(R_EN, GPIO.HIGH) 
     GPIO.output(L_EN, GPIO.HIGH)
     
     pwm_r = GPIO.PWM(RPWM, 1000)
@@ -55,7 +59,7 @@ def main():
     print("Motor initialized.")
     print("\nSystem Armed. Perturb the testbed to test the PID loop. Press Ctrl+C to stop.\n")
 
-    # 3. PID VARIABLES
+    # PID VARIABLES
     target_rpm = 0.0
     integral = 0.0
     prev_error = 0.0
@@ -66,11 +70,11 @@ def main():
             current_time = time.time()
             dt = current_time - last_time
             
-            # Avoid divide-by-zero on the very first loop
+            # Avoid dividde by zero on first loop
             if dt <= 0:
                 continue
                 
-            # 4. READ IMU (PROCESS VARIABLE)
+            # READ IMU
             platform_rpm = 0.0
             try:
                 gyro_data = sensor.gyro
@@ -79,7 +83,7 @@ def main():
             except Exception:
                 pass # Skip loop if I2C drops a packet
                 
-            # 5. PID MATH
+            # PID CONTROL
             error = target_rpm - platform_rpm
             
             # Anti-windup for integral (only integrate if we aren't saturating the motor)
@@ -88,18 +92,17 @@ def main():
             
             control_signal = (Kp * error) + (Ki * integral) + (Kd * derivative)
             
-            # 6. MOTOR COMMAND
-            # Determine direction based on the sign of the control signal
-            # Note: You may need to swap 'pwm_r' and 'pwm_l' depending on your physical motor wiring
+            # MOTOR COMMAND
+            # Determine spin direction based on the sign of control signal
             duty_cycle = clamp(abs(control_signal), MIN_PWM, MAX_PWM)
             
             if control_signal > 0:
-                # Spin one way
+                # Spin clockwise
                 pwm_l.ChangeDutyCycle(0)
                 pwm_r.ChangeDutyCycle(duty_cycle)
                 direction = "CW "
             elif control_signal < 0:
-                # Spin the other way
+                # Spin counterclockwise
                 pwm_r.ChangeDutyCycle(0)
                 pwm_l.ChangeDutyCycle(duty_cycle)
                 direction = "CCW"
@@ -110,11 +113,11 @@ def main():
                 
             print(f"Platform: {platform_rpm:>6.1f} RPM | Error: {error:>6.1f} | Command: {direction} at {duty_cycle:>5.1f}% PWM")
             
-            # Update variables for next loop
+            # Update PID variables
             prev_error = error
             last_time = current_time
             
-            # Run loop at approx 50Hz for smooth control
+            # PID loop run at 50 Hertz
             time.sleep(0.02)
 
     except KeyboardInterrupt:

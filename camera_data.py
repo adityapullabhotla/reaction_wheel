@@ -1,13 +1,16 @@
+
+# This is just a test file to see if the camera is giving data
+
 import cv2
 import time
 from picamera2 import Picamera2
 
 def test_camera():
     print("Initializing native Pi 5 camera...")
-    # 1. Initialize the native Pi 5 camera library
+    # Initialize native Pi 5 camera library
     picam2 = Picamera2()
 
-    # 2. Configure it for high-speed tracking (640x480)
+    # Configure for tracking (640x480)
     config = picam2.create_preview_configuration(main={"size": (640, 480), "format": "RGB888"})
     picam2.configure(config)
     
@@ -20,17 +23,17 @@ def test_camera():
 
     try:
         while True:
-            # 3. Grab the frame directly as a Numpy array (OpenCV's native format!)
+            # Grab the frame directly as a Numpy array from OpenCV
             frame = picam2.capture_array()
             
-            # Picamera2 grabs in RGB, but OpenCV expects BGR colors
+            # Picamera2 grabs in RGB, but OpenCV uses BGR colors
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2RGB)
             
             frames_grabbed += 1
             if frames_grabbed % 10 == 0:
                 print(f"Success! Grabbed {frames_grabbed} frames directly from ISP...")
 
-            #Leave these commented out while on SSH
+            # Leave commented if connected to Pi remotely.
             # cv2.imshow('Arducam Feed', frame)
             # if cv2.waitKey(1) & 0xFF == ord('q'):
             #     break
