@@ -1,5 +1,6 @@
 import cv2
 import time
+import numpy as np
 from picamera2 import Picamera2
 from flask import Flask, Response
 
@@ -42,8 +43,22 @@ def generate_frames():
         cv2.line(frame, (320, 0), (320, 480), (0, 255, 0), 1)
         cv2.line(frame, (0, 240), (640, 240), (0, 255, 0), 1)
 
-        # --- CHANGE: Draw the dynamic tracking marker (Red) ---
+        # --- CHANGE: Draw the dynamic tracking marker and HSV text ---
         if tracked_x is not None and tracked_y is not None and tracked_r is not None:
+            
+            # Ensure coordinates are safely within frame boundaries
+            if 0 <= tracked_x < 640 and 0 <= tracked_y < 480:
+                # Grab the raw BGR pixel exactly at the center of the ball
+                pixel_bgr = np.uint8([[frame[tracked_y, tracked_x]]])
+                
+                # Convert only that single pixel to HSV to save Pi CPU cycles
+                h, s, v = cv2.cvtColor(pixel_bgr, cv2.COLOR_BGR2HSV)[0][0]
+                
+                # Overlay the text slightly above and to the right of the center
+                hsv_text = f"HSV: {h}, {s}, {v}"
+                cv2.putText(frame, hsv_text, (tracked_x + 15, tracked_y - 15), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
             # Draw a circle outlining the ball
             cv2.circle(frame, (tracked_x, tracked_y), tracked_r, (0, 0, 255), 2)
             # Draw a dot perfectly in the center of the ball

@@ -25,12 +25,12 @@ pwm_r.start(0)
 pwm_l.start(0)
 
 # PID GAINS
-Kp = 0.1 # Proportional gain: How aggressively to fight the spin
+Kp = 0.05 # Proportional gain: How aggressively to fight the spin
 Ki = 0.00 # Integral gain: Fixes steady-state errors over time (don't want to use this for tracking)
-Kd = 0.05 # Derivative gain: Dampens the response to prevent overshoot
+Kd = 0.02 # Derivative gain: Dampens the response to prevent overshoot
 
 # SET MOTOR POWER LIMITS TO ENSURE SMOOTH TRACKING AND PREVENT REACTION WHEEL SATURATION
-PWM_MIN = 12.0 # enough to overcome friction
+PWM_MIN = 10.0 # enough to overcome friction
 PWM_MAX = 40.0 # cap to motor output to keep control and avoid saturation
 
 # Dead Zone
@@ -57,11 +57,11 @@ CIRCULARITY_THRESHOLD = 0.4 #.4 to allow for half-circles when ball is only part
 MISS_FRAMES_BEFORE_SEARCH = 8
 
 # How long to hold the last-known direction before giving up and sweeping.
-SEARCH_HOLD_TIME = 1.5      # seconds
-SEARCH_HOLD_PWM  = 15.0     # power for directional search
+SEARCH_HOLD_TIME = 3      # seconds
+SEARCH_HOLD_PWM  = 5.0     # power for directional search
 
 # Constant slow sweep power once hold phase expires
-SEARCH_SWEEP_PWM = 10.0     # slow enough to actually catch the ball when it appears
+SEARCH_SWEEP_PWM = 5.0     # slow enough to actually catch the ball when it appears
 
 
 def clamp_motor(value):
