@@ -1,18 +1,30 @@
 import cv2
 import time
 import threading
+import sys
 import numpy as np
 import RPi.GPIO as GPIO
+import board
+import busio
 import matplotlib.pyplot as plt
+from adafruit_bno08x.i2c import BNO08X_I2C
+from adafruit_bno08x import BNO_REPORT_GYROSCOPE
 from picamera2 import Picamera2
-from camera_live_feed import app, set_camera, update_tracking_marker
+from camera_live_feed2 import app, set_camera, update_tracking_marker
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  HARDWARE PINS
-# ══════════════════════════════════════════════════════════════════════════════
-R_EN, L_EN = 26, 16
-RPWM, LPWM = 5,  6
+# --- SHARED SYSTEM VARIABLES ---
+target_rpm = 0.0
+actual_rpm = 0.0    # Added for graphing
+current_pwm = 0.0   # Added for graphing
+system_running = True
 
+# --- HARDWARE PINS ---
+R_EN = 26
+L_EN = 16
+RPWM = 5
+LPWM = 6
+
+# --- GPIO SETUP ---
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 GPIO.setup([R_EN, L_EN, RPWM, LPWM], GPIO.OUT)
@@ -24,158 +36,159 @@ pwm_l = GPIO.PWM(LPWM, 1000)
 pwm_r.start(0)
 pwm_l.start(0)
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  TUNING — everything in one place
-# ══════════════════════════════════════════════════════════════════════════════
+def clamp(value, min_val, max_val):
+    return max(min_val, min(value, max_val))
 
-# ── Vision ────────────────────────────────────────────────────────────────────
-BALL_LOWER = (25, 120, 150)
-BALL_UPPER = (55, 255, 255)
-
-MIN_AREA = 3000    
-CIRCULARITY_THRESHOLD = 0.45   
-
-# ── Smoothing ─────────────────────────────────────────────────────────────────
-SMOOTH_FRAMES  = 5
-
-# ── PID ───────────────────────────────────────────────────────────────────────
-Kp = 0.65   
-Ki = 0.0   
-Kd = 0.4   
-
-# ── Motor output (%) ──────────────────────────────────────────────────────────
-PWM_DEAD   =  0.0   
-PWM_MIN    =  15.0   
-PWM_MAX    =  9.5   
-DEAD_ZONE_PX = 100   
-
-# ── Search state ──────────────────────────────────────────────────────────────
-SEARCH_PWM = 5   
-SEARCH_REVERSE_SEC = 2.5   
-
-# ── Momentum (edge tracking) ──────────────────────────────────────────────────
-MOMENTUM_SEC   = 0.2   
-MOMENTUM_SCALE = 0.5  
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  STATE MACHINE
-# ══════════════════════════════════════════════════════════════════════════════
-class State:
-    TRACKING  = "TRACKING"   
-    MOMENTUM  = "MOMENTUM"   
-    SEARCHING = "SEARCHING"  
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  MOTOR HELPERS
-# ══════════════════════════════════════════════════════════════════════════════
-
-def set_motor(pwm_cmd: float):
-    power = abs(pwm_cmd)
-    if power < 0.5:
-        pwm_l.ChangeDutyCycle(0)
-        pwm_r.ChangeDutyCycle(0)
+# ==========================================
+# INNER LOOP: HIGH-SPEED IMU VELOCITY CONTROL
+# ==========================================
+def imu_control_thread():
+    global target_rpm, actual_rpm, current_pwm, system_running
+    
+    print("Starting IMU Inner Loop...")
+    try:
+        i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+        sensor = BNO08X_I2C(i2c)
+        sensor.enable_feature(BNO_REPORT_GYROSCOPE)
+    except Exception as e:
+        print(f"Error initializing IMU: {e}")
+        system_running = False
         return
-    if pwm_cmd > 0:
-        pwm_l.ChangeDutyCycle(0)
-        pwm_r.ChangeDutyCycle(power)
-    else:
-        pwm_r.ChangeDutyCycle(0)
-        pwm_l.ChangeDutyCycle(power)
 
+    # Demo 1 Gains
+    Kp_imu = 3.5   
+    Ki_imu = 0.175  
+    Kd_imu = 0.1   
+    
+    integral = 0.0
+    prev_error = 0.0
+    last_time = time.time()
+    
+    while system_running:
+        current_time = time.time()
+        dt = current_time - last_time
+        if dt <= 0: continue
+            
+        platform_rpm = 0.0
+        try:
+            gyro_data = sensor.gyro
+            if gyro_data and gyro_data[2] is not None:
+                platform_rpm = gyro_data[2] * 9.549297 
+                actual_rpm = platform_rpm # Share with main thread for graphing
+        except Exception:
+            pass 
+            
+        error = target_rpm - platform_rpm
+        
+        integral += error * dt
+        derivative = (error - prev_error) / dt
+        control_signal = (Kp_imu * error) + (Ki_imu * integral) + (Kd_imu * derivative)
+        
+        duty_cycle = clamp(abs(control_signal), 0.0, 100.0)
+        
+        if control_signal > 0:
+            pwm_l.ChangeDutyCycle(0)
+            pwm_r.ChangeDutyCycle(duty_cycle)
+            current_pwm = duty_cycle # Share signed PWM for graphing
+        elif control_signal < 0:
+            pwm_r.ChangeDutyCycle(0)
+            pwm_l.ChangeDutyCycle(duty_cycle)
+            current_pwm = -duty_cycle
+        else:
+            pwm_r.ChangeDutyCycle(0)
+            pwm_l.ChangeDutyCycle(0)
+            current_pwm = 0.0
+            
+        prev_error = error
+        last_time = current_time
+        time.sleep(0.02) # 50 Hz loop
 
-def pid_to_motor(error: float, raw_pid: float) -> float:
-    if abs(error) < DEAD_ZONE_PX:
-        return 0.0
-    sign  = 1.0 if raw_pid >= 0 else -1.0
-    power = max(PWM_MIN, min(abs(raw_pid), PWM_MAX))
-    return sign * power
+# ==========================================
+# OUTER LOOP: CAMERA VISION TRACKING
+# ==========================================
+BALL_LOWER = (30, 150, 100)
+BALL_UPPER = (45, 255, 255)
+MIN_AREA = 400
+CIRCULARITY_THRESHOLD = 0.65
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  BALL DETECTION
-# ══════════════════════════════════════════════════════════════════════════════
+def is_circular(contour):
+    area = cv2.contourArea(contour)
+    perimeter = cv2.arcLength(contour, True)
+    if perimeter == 0: return False
+    return (4 * np.pi * area) / (perimeter ** 2) >= CIRCULARITY_THRESHOLD
 
 def find_ball(frame):
     hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, BALL_LOWER, BALL_UPPER)
+    mask = cv2.erode(mask,  None, iterations=2)
+    mask = cv2.dilate(mask, None, iterations=2)
+    contours, _ = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    k    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
-    mask = cv2.erode(mask,  k, iterations=1)
-    mask = cv2.dilate(mask, k, iterations=2)
-
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    best, best_area = None, 0
+    best = None
+    best_area = 0
     for c in contours:
-        area  = cv2.contourArea(c)
-        perim = cv2.arcLength(c, True)
-        circ  = (4 * np.pi * area / perim ** 2) if perim > 0 else 0
-        if area < MIN_AREA or circ < CIRCULARITY_THRESHOLD:
-            continue
+        area = cv2.contourArea(c)
+        if area < MIN_AREA or not is_circular(c): continue
         if area > best_area:
-            best_area, best = area, c
+            best_area = area
+            best = c
 
-    if best is None:
-        return None
-
+    if best is None: return None
     M = cv2.moments(best)
-    if M["m00"] == 0:
-        return None
+    if M["m00"] == 0: return None
+    
+    return int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]), int(cv2.minEnclosingCircle(best)[1])
 
-    cx     = int(M["m10"] / M["m00"])
-    cy     = int(M["m01"] / M["m00"])
-    _, rad = cv2.minEnclosingCircle(best)
-    return cx, cy, int(rad)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  REPORT GRAPHING UTILITY
-# ══════════════════════════════════════════════════════════════════════════════
-
-def generate_report_graphs(t_data, e_data, p_data):
-    if not t_data:
+# ==========================================
+# GRAPH GENERATOR
+# ==========================================
+def generate_cascaded_graphs(t_log, err_log, t_rpm_log, a_rpm_log, pwm_log):
+    if not t_log:
         print("No data collected to graph.")
         return
 
-    print("Rendering report graphs. This may take a moment...")
-    plt.figure(figsize=(10, 8))
+    print("Rendering Sensor Fusion report graphs. This may take a moment...")
+    plt.figure(figsize=(12, 10))
 
-    # Subplot 1: Vision Tracking Error over Time
-    plt.subplot(2, 1, 1)
-    plt.plot(t_data, e_data, label='Pixel Error', color='blue', linewidth=2)
-    plt.axhline(0, color='red', linestyle='--', label='Center (0 Error)')
-    plt.axhline(DEAD_ZONE_PX, color='orange', linestyle=':', label='Deadzone Boundary')
-    plt.axhline(-DEAD_ZONE_PX, color='orange', linestyle=':')
-    plt.title('Vision Tracking Performance (Position Control)')
-    plt.ylabel('Displacement Error (pixels)')
-    plt.legend()
+    # Subplot 1: Outer Loop (Vision Pixel Error)
+    plt.subplot(3, 1, 1)
+    plt.plot(t_log, err_log, label='Pixel Displacement', color='purple', linewidth=2)
+    plt.axhline(0, color='black', linestyle='--', alpha=0.6)
+    plt.title('Outer Loop: Vision Position Tracking')
+    plt.ylabel('Error (Pixels)')
+    plt.legend(loc='upper right')
     plt.grid(True)
 
-    # Subplot 2: Motor PWM Control Effort over Time
-    plt.subplot(2, 1, 2)
-    plt.plot(t_data, p_data, label='Motor Output', color='green', linewidth=2)
-    plt.axhline(PWM_MAX, color='red', linestyle=':', label='Max CW Power')
-    plt.axhline(-PWM_MAX, color='red', linestyle=':', label='Max CCW Power')
+    # Subplot 2: Inner Loop (Velocity Tracking)
+    plt.subplot(3, 1, 2)
+    plt.plot(t_log, t_rpm_log, label='Commanded Target RPM (From Camera)', color='red', linestyle='--', linewidth=2)
+    plt.plot(t_log, a_rpm_log, label='Actual Platform RPM (From IMU)', color='blue', linewidth=2, alpha=0.7)
+    plt.title('Inner Loop: IMU Velocity Tracking')
+    plt.ylabel('Angular Velocity (RPM)')
+    plt.legend(loc='upper right')
+    plt.grid(True)
+
+    # Subplot 3: Motor Control Effort
+    plt.subplot(3, 1, 3)
+    plt.plot(t_log, pwm_log, label='Motor Output', color='green', linewidth=2)
+    plt.axhline(100, color='black', linestyle=':', alpha=0.6, label='Saturation Limits')
+    plt.axhline(-100, color='black', linestyle=':', alpha=0.6)
+    plt.title('Actuator Control Effort')
     plt.xlabel('Time (Seconds)')
-    plt.ylabel('Motor Control Effort (% PWM)')
-    plt.legend()
+    plt.ylabel('Motor Output (% PWM)')
+    plt.legend(loc='upper right')
     plt.grid(True)
 
     plt.tight_layout()
-    filename = "vision_tracking_report.png"
+    filename = "demo2_cascaded_control_report.png"
     plt.savefig(filename)
     print(f"Graph successfully saved as: {filename}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  MAIN TRACKING LOOP
-# ══════════════════════════════════════════════════════════════════════════════
-
 def track():
-    print("Initialising camera…")
+    global target_rpm, system_running, actual_rpm, current_pwm
+    
+    print("Initializing Pi 5 Camera...")
     picam2 = Picamera2()
     config = picam2.create_preview_configuration(main={"size": (640, 480), "format": "BGR888"})
     picam2.configure(config)
@@ -184,162 +197,122 @@ def track():
         "FrameRate": 60,            
         "AeEnable": False,          
         "ExposureTime": 15000,      
-        "AnalogueGain": 7.0         
+        "AnalogueGain": 5.0         
     })
 
     picam2.start()
     time.sleep(2.0)
 
     set_camera(picam2)
-    threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=5000, threaded=True),
-        daemon=True
-    ).start()
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000, threaded=True), daemon=True).start()
+    
+    imu_thread = threading.Thread(target=imu_control_thread, daemon=True)
+    imu_thread.start()
 
-    print("\n" + "═" * 54)
-    print("  LIVE FEED → http://<YOUR_PI_IP>:5000")
-    print("═" * 54)
-    print(f"  Kp={Kp} Ki={Ki} Kd={Kd} | PWM {PWM_MIN}–{PWM_MAX}%")
-    print(f"  Dead={DEAD_ZONE_PX}px | Smooth={SMOOTH_FRAMES}f")
-    print(f"  Momentum={MOMENTUM_SEC}s | Search={SEARCH_PWM}%\n")
+    # --- FIXED TUNING VARIABLES ---
+    center_x = 320
+    DEAD_ZONE_PX = 20  
+    Kp_vision = 0.05   
+    
+    ball_x_history = []
+    SMOOTH_FRAMES = 3
 
-    CENTER_X       = 320          
-    state          = State.SEARCHING
-
-    integral       = 0.0
-    prev_error     = 0.0
-    start_time     = time.time()
-    prev_time      = start_time
-
-    # ── Graph Data Arrays ────────────────────────────────────────────────────
+    miss_count = 0
+    last_known_dir = 1
+    last_sweep_toggle = time.time()
+    
+    # --- GRAPH LOGGING ARRAYS ---
     time_log = []
     error_log = []
+    target_rpm_log = []
+    actual_rpm_log = []
     pwm_log = []
+    
+    start_time = time.time()
 
-    x_history: list[int] = []
-    last_pwm_out   = 0.0          
-    lost_at        = 0.0          
-    search_dir     = 1
-    sweep_start    = time.time()
+    print("\nCascaded Control Active. Press Ctrl+C to stop and render graphs.")
 
     try:
-        while True:
+        while system_running:
             frame = picam2.capture_array()
-            frame = frame[:, :, ::-1]     
-            frame = cv2.flip(frame, -1)   
-
-            now = time.time()
-            dt  = max(now - prev_time, 0.001)
-            prev_time = now
-            elapsed_time = now - start_time
+            frame = frame[:, :, ::-1]   
+            frame = cv2.flip(frame, -1)
 
             result = find_ball(frame)
+            current_time = time.time()
+            elapsed = current_time - start_time
 
-            # ── TRACKING ─────────────────────────────────────────────────
             if result is not None:
+                # --- TRACKING MODE ---
                 ball_cx, ball_cy, radius = result
                 update_tracking_marker(ball_cx, ball_cy, radius)
+                miss_count = 0
 
-                x_history.append(ball_cx)
-                if len(x_history) > SMOOTH_FRAMES:
-                    x_history.pop(0)
+                ball_x_history.append(ball_cx)
+                if len(ball_x_history) > SMOOTH_FRAMES: ball_x_history.pop(0)
+                smoothed_cx = int(sum(ball_x_history) / len(ball_x_history))
 
-                if len(x_history) < SMOOTH_FRAMES:
-                    set_motor(0)
-                    state = State.TRACKING
-                    print(f"  WARMUP   | buffering {len(x_history)}/{SMOOTH_FRAMES}")
-                    continue
+                error = center_x - smoothed_cx   
 
-                smoothed_cx = int(sum(x_history) / len(x_history))
-                error       = CENTER_X - smoothed_cx   
+                if abs(error) > DEAD_ZONE_PX:
+                    last_known_dir = 1 if error > 0 else -1
 
-                if state != State.TRACKING:
-                    prev_error = error
-                    integral   = 0.0
+                if abs(error) < DEAD_ZONE_PX:
+                    target_rpm = 0.0 
+                else:
+                    target_rpm = Kp_vision * error 
+                    target_rpm = clamp(target_rpm, -25.0, 25.0)
 
-                state = State.TRACKING
-
-                integral  += error * dt
-                derivative = (error - prev_error) / dt
-                raw_out    = Kp * error + Ki * integral + Kd * derivative
-                pwm_out    = pid_to_motor(error, raw_out)
-
-                set_motor(pwm_out)
-                last_pwm_out = pwm_out
-                prev_error   = error
-
-                # Log tracking data
-                time_log.append(elapsed_time)
+                # Log Active Tracking Data
+                time_log.append(elapsed)
                 error_log.append(error)
-                pwm_log.append(pwm_out)
+                target_rpm_log.append(target_rpm)
+                actual_rpm_log.append(actual_rpm)
+                pwm_log.append(current_pwm)
 
-                label = "CENTRED " if abs(error) < DEAD_ZONE_PX else "TRACKING"
-                print(f"  {label} | x:{smoothed_cx:3d} | "
-                      f"err:{error:+5.1f}px | motor:{pwm_out:+5.1f}%")
+                print(f"TRACKING | Error: {error:+6.1f}px | Cmd RPM: {target_rpm:+.1f} | Actual RPM: {actual_rpm:+.1f}")
 
-            # ── BALL LOST ─────────────────────────────────────────────────
             else:
+                # --- SEARCH MODE ---
                 update_tracking_marker(None, None, None)
-                x_history.clear()
+                miss_count += 1
+                ball_x_history.clear()  
 
-                if state == State.TRACKING:
-                    state   = State.MOMENTUM
-                    lost_at = now
-
-                if state == State.MOMENTUM:
-                    elapsed = now - lost_at
-                    if elapsed < MOMENTUM_SEC and abs(last_pwm_out) > 0.5:
-                        coast = last_pwm_out * MOMENTUM_SCALE
-                        set_motor(coast)
-                        
-                        # Log momentum data
-                        time_log.append(elapsed_time)
-                        error_log.append(np.nan) # NaN used so the error line breaks on the graph
-                        pwm_log.append(coast)
-                        
-                        print(f"  MOMENTUM | coasting {coast:+5.1f}% "
-                              f"({elapsed:.2f}/{MOMENTUM_SEC}s)")
-                        continue
-                    else:
-                        state       = State.SEARCHING
-                        search_dir  = 1 if (last_pwm_out >= 0) else -1  
-                        sweep_start = now
-                        prev_error  = 0.0
-                        integral    = 0.0
-
-                if state == State.SEARCHING:
-                    if now - sweep_start >= SEARCH_REVERSE_SEC:
-                        search_dir  *= -1
-                        sweep_start  = now
-
-                    sweep_pwm = search_dir * SEARCH_PWM
-                    set_motor(sweep_pwm)
+                if miss_count < 8:
+                    target_rpm = 0.0 
+                else:
+                    if time.time() - last_sweep_toggle > 2.0:
+                        last_known_dir *= -1
+                        last_sweep_toggle = time.time()
                     
-                    # Log search data
-                    time_log.append(elapsed_time)
-                    error_log.append(np.nan)
-                    pwm_log.append(sweep_pwm)
+                    target_rpm = last_known_dir * 3.0 # Fixed to prevent saturation
                     
-                    rev_in = max(0.0, SEARCH_REVERSE_SEC - (now - sweep_start))
-                    print(f"  SEARCH   | {'>>>' if search_dir > 0 else '<<<'} "
-                          f"@ {SEARCH_PWM}% | rev in {rev_in:.1f}s")
+                # Log Search Data (Use NaN for error so the graph line breaks nicely when ball is lost)
+                time_log.append(elapsed)
+                error_log.append(np.nan)
+                target_rpm_log.append(target_rpm)
+                actual_rpm_log.append(actual_rpm)
+                pwm_log.append(current_pwm)
+
+                print(f"SEARCHING | Cmd RPM: {target_rpm:+.1f} | Actual RPM: {actual_rpm:+.1f}")
 
     except KeyboardInterrupt:
-        print("\nStopped.")
+        print("\nStopping testbed...")
     finally:
-        # 1. Safely stop the hardware
-        set_motor(0)
+        system_running = False 
+        time.sleep(0.1)
         pwm_l.stop()
         pwm_r.stop()
-        for pin in [RPWM, LPWM, R_EN, L_EN]:
-            GPIO.output(pin, GPIO.LOW)
+        GPIO.output(RPWM, GPIO.LOW)
+        GPIO.output(LPWM, GPIO.LOW)
+        GPIO.output(R_EN, GPIO.LOW)
+        GPIO.output(L_EN, GPIO.LOW)
         GPIO.cleanup()
         picam2.stop()
         print("Hardware cleaned up.")
         
-        # 2. Render the graphs
-        generate_report_graphs(time_log, error_log, pwm_log)
+        # Trigger the matplotlib function
+        generate_cascaded_graphs(time_log, error_log, target_rpm_log, actual_rpm_log, pwm_log)
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     track()
