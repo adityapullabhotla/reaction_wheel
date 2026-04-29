@@ -28,12 +28,12 @@ pwm_l.start(0)
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Vision ────────────────────────────────────────────────────────────────────
-# HSV range for a standard yellow-green tennis ball
-BALL_LOWER = (25, 120, 150)
-BALL_UPPER = (55, 255, 255)
+# HSV range for bright green (matches the uploaded paper)
+TARGET_LOWER = (40, 100, 100)
+TARGET_UPPER = (80, 255, 255)
 
 MIN_AREA = 3000    # px²  — ignore specks
-CIRCULARITY_THRESHOLD = 0.45   # 0–1, ball ≈ 0.78 when whole
+EXTENT_THRESHOLD = 0.60  # 0–1 scale. 1.0 is a perfect solid rectangle.
 
 # ── Smoothing ─────────────────────────────────────────────────────────────────
 # Rolling average over this many frames. More = smoother but laggier.
@@ -57,9 +57,8 @@ SEARCH_PWM = 5   # % — barely above stall
 SEARCH_REVERSE_SEC = 2.5   # seconds before reversing sweep direction
 
 # ── Momentum (edge tracking) ──────────────────────────────────────────────────
-# When the ball leaves the frame the motor keeps running in the last-known
+# When the target leaves the frame the motor keeps running in the last-known
 # direction at reduced power for this many seconds before switching to Search.
-# This handles the "ball partially out of frame" case you mentioned.
 MOMENTUM_SEC   = 0.2   # how long to coast after last detection
 MOMENTUM_SCALE = 0.5  # fraction of last PWM output to use while coasting
 
@@ -68,9 +67,9 @@ MOMENTUM_SCALE = 0.5  # fraction of last PWM output to use while coasting
 #  STATE MACHINE
 # ══════════════════════════════════════════════════════════════════════════════
 class State:
-    TRACKING  = "TRACKING"   # ball visible — running PID
-    MOMENTUM  = "MOMENTUM"   # ball just lost — coasting in last direction
-    SEARCHING = "SEARCHING"  # ball gone — slow sweep
+    TRACKING  = "TRACKING"   # target visible — running PID
+    MOMENTUM  = "MOMENTUM"   # target just lost — coasting in last direction
+    SEARCHING = "SEARCHING"  # target gone — slow sweep
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -111,19 +110,19 @@ def pid_to_motor(error: float, raw_pid: float) -> float:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  BALL DETECTION
+#  TARGET DETECTION (RECTANGLE)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def find_ball(frame):
+def find_target(frame):
     """
-    Returns (cx, cy, radius) of the best tennis-ball candidate, or None.
-    Works even when only part of the ball is in frame (lower circularity OK).
+    Returns (cx, cy, size) of the best green rectangle candidate, or None.
+    Uses 'extent' (area / bounding box area) instead of circularity.
     """
     hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, BALL_LOWER, BALL_UPPER)
+    mask = cv2.inRange(hsv, TARGET_LOWER, TARGET_UPPER)
 
-    # Morphology: close gaps, remove noise
-    k    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    # Morphology: Blocky/Rectangular structural element to match our shape
+    k    = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
     mask = cv2.erode(mask,  k, iterations=1)
     mask = cv2.dilate(mask, k, iterations=2)
@@ -134,24 +133,32 @@ def find_ball(frame):
     best, best_area = None, 0
     for c in contours:
         area  = cv2.contourArea(c)
-        perim = cv2.arcLength(c, True)
-        circ  = (4 * np.pi * area / perim ** 2) if perim > 0 else 0
-        if area < MIN_AREA or circ < CIRCULARITY_THRESHOLD:
+        if area < MIN_AREA:
             continue
+            
+        # Calculate bounding box and extent (rectangularity)
+        x, y, w, h = cv2.boundingRect(c)
+        bounding_area = float(w * h)
+        extent = area / bounding_area if bounding_area > 0 else 0
+        
+        # Check against our 0.60 threshold
+        if extent < EXTENT_THRESHOLD:
+            continue
+            
         if area > best_area:
             best_area, best = area, c
 
     if best is None:
         return None
 
-    M = cv2.moments(best)
-    if M["m00"] == 0:
-        return None
-
-    cx     = int(M["m10"] / M["m00"])
-    cy     = int(M["m01"] / M["m00"])
-    _, rad = cv2.minEnclosingCircle(best)
-    return cx, cy, int(rad)
+    # Get the center of the best rectangle
+    x, y, w, h = cv2.boundingRect(best)
+    cx     = x + (w // 2)
+    cy     = y + (h // 2)
+    
+    # We pass half the longest side so it doesn't crash your update_tracking_marker function
+    pseudo_radius = max(w, h) // 2 
+    return cx, cy, pseudo_radius
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -202,7 +209,7 @@ def track():
 
     # Momentum
     last_pwm_out   = 0.0          # last motor command while tracking
-    lost_at        = 0.0          # time ball disappeared
+    lost_at        = 0.0          # time target disappeared
 
     # Search sweep
     search_dir     = 1
@@ -218,15 +225,15 @@ def track():
             dt  = max(now - prev_time, 0.001)
             prev_time = now
 
-            result = find_ball(frame)
+            result = find_target(frame)
 
             # ── TRACKING ─────────────────────────────────────────────────
             if result is not None:
-                ball_cx, ball_cy, radius = result
-                update_tracking_marker(ball_cx, ball_cy, radius)
+                target_cx, target_cy, radius = result
+                update_tracking_marker(target_cx, target_cy, radius)
 
                 # Accumulate smoothing buffer
-                x_history.append(ball_cx)
+                x_history.append(target_cx)
                 if len(x_history) > SMOOTH_FRAMES:
                     x_history.pop(0)
 
@@ -238,7 +245,7 @@ def track():
                     continue
 
                 smoothed_cx = int(sum(x_history) / len(x_history))
-                error       = CENTER_X - smoothed_cx   # + = ball is left of centre
+                error       = CENTER_X - smoothed_cx   # + = target is left of centre
 
                 # Seed prev_error on first real reading so D-term starts near 0
                 if state != State.TRACKING:
@@ -261,7 +268,7 @@ def track():
                 print(f"  {label} | x:{smoothed_cx:3d} | "
                       f"err:{error:+5.1f}px | motor:{pwm_out:+5.1f}%")
 
-            # ── BALL LOST ─────────────────────────────────────────────────
+            # ── TARGET LOST ─────────────────────────────────────────────────
             else:
                 update_tracking_marker(None, None, None)
                 x_history.clear()
