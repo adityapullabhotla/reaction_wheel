@@ -54,8 +54,11 @@ Power	Battery with inline fuse and master switch; 18 AWG power runs, 24 AWG sign
 
 <img width="2005" height="1279" alt="image" src="https://github.com/user-attachments/assets/b75ec983-6a9f-4529-a661-fe9bfa4f604d" />
 
+<img width="383" height="183" alt="Screenshot 2026-09-24 at 08 33 25" src="https://github.com/user-attachments/assets/c03d85f7-8eea-495d-be3f-716d89b466e5" />
 
-<img width="2000" height="2588" alt="image" src="https://github.com/user-attachments/assets/4bd83f95-3c8d-49fa-8255-aa58725af475" />
+<img width="3024" height="4032" alt="image" src="https://github.com/user-attachments/assets/273dfe8e-489a-46b3-b1be-aa41f1d1d4eb" />
+
+
 
 
 
