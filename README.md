@@ -52,3 +52,10 @@ Flywheel	240 mm diameter, 20 mm thick, spoked hoop geometry, 16 alternating M5/M
 Structure	3D-printed base, motor support, and bearing block; REV Robotics UltraHex shaft
 Power	Battery with inline fuse and master switch; 18 AWG power runs, 24 AWG signal runs
 
+<img width="2005" height="1279" alt="image" src="https://github.com/user-attachments/assets/b75ec983-6a9f-4529-a661-fe9bfa4f604d" />
+
+
+<img width="2000" height="2588" alt="image" src="https://github.com/user-attachments/assets/4bd83f95-3c8d-49fa-8255-aa58725af475" />
+
+
+
