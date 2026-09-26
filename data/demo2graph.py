@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from adafruit_bno08x.i2c import BNO08X_I2C
 from adafruit_bno08x import BNO_REPORT_GYROSCOPE
 from picamera2 import Picamera2
-from camera_live_feed2 import app, set_camera, update_tracking_marker
+from camera_live_feed import app, set_camera, update_tracking_marker
 
 # --- SHARED SYSTEM VARIABLES ---
 target_rpm = 0.0
